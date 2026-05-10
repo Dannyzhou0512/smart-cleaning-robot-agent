@@ -1,15 +1,13 @@
 import os
-from xml.dom.minidom import Document
 
 from langchain_chroma import Chroma
+from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from sympy.codegen.ast import continue_
 
 from Agent_project.utils.file_handler import txt_loader, pdf_loader, listdir_with_allowed_type, get_file_md5_hex
 from Agent_project.utils.path_tool import get_abs_path
 from Agent_project.utils.config_handler import chroma_config
 from model.factory import embed_model
-import hashlib
 from Agent_project.utils.logger_handler import logger
 
 
@@ -18,7 +16,7 @@ class VectorStoreService:
         self.vector_store = Chroma(
             collection_name=chroma_config["collection_name"],
             embedding_function=embed_model,
-            persist_directory=chroma_config["persist_directory"]
+            persist_directory=get_abs_path(chroma_config["persist_directory"])
         )
 
         self.spliter = RecursiveCharacterTextSplitter(
@@ -30,6 +28,23 @@ class VectorStoreService:
 
     def get_retriever(self):
         return self.vector_store.as_retriever(search_kwargs={"k": chroma_config["k"]})
+
+    def similarity_search_with_scores(self, query: str) -> list[tuple[Document, float | None]]:
+        """
+        返回检索文档及相似度分数。
+
+        Chroma 的 similarity_search_with_relevance_scores 通常返回 0-1 之间的相关性分数；
+        如果当前版本不可用，则回退为普通检索，分数置为空。
+        """
+        try:
+            return self.vector_store.similarity_search_with_relevance_scores(
+                query,
+                k=chroma_config["k"],
+            )
+        except Exception as e:
+            logger.warning(f"[RAG检索]获取相似度分数失败，回退为普通检索: {e}")
+            docs = self.get_retriever().invoke(query)
+            return [(doc, None) for doc in docs]
 
     def load_document(self):
         """
@@ -69,13 +84,17 @@ class VectorStoreService:
             tuple(chroma_config["allow_knowledge_file_type"])
         )
 
+        collection_is_empty = self.vector_store._collection.count() == 0
+
         for path in allowed_file_path:
             md5_hex = get_file_md5_hex(path)
             # if md5_hex is None:
             #     logger.warning(f"[加载知识库] {path}无法计算MD5，跳过")
             #     continue
 
-            if check_md5_hex(md5_hex):
+            already_loaded = check_md5_hex(md5_hex)
+
+            if already_loaded and not collection_is_empty:
                 logger.info(f"[加载知识库] {path}内容已经存在知识库内， 跳过")
                 continue
 
@@ -95,7 +114,8 @@ class VectorStoreService:
                 self.vector_store.add_documents(split_document)
 
                 # 记录这个已经处理好的文件的md5，避免下次重复加载
-                save_md5_hex(md5_hex)
+                if not already_loaded:
+                    save_md5_hex(md5_hex)
                 logger.info(f"[加载知识库] {path}内容已成功载入向量库")
             except Exception as e:
                 # exc_info=True会记录详细的报错堆栈，如果为False仅记录报错信息本身

@@ -1,4 +1,5 @@
 from langchain_core.tools import tool
+from rag.query_rewrite_service import QueryRewriteService
 from rag.rag_service import RagSummarizeService
 import random
 from Agent_project.utils.config_handler import agents_config
@@ -7,10 +8,35 @@ import os
 from Agent_project.utils.logger_handler import logger
 import requests
 rag = RagSummarizeService()
+query_rewriter = QueryRewriteService()
 user_ids = ["1234567890", "9876543210", "1111111111", "2222222222", "3333333333"]
 month_arr = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"]
 extra_data = {}
 user_location_context = {}
+conversation_memory_context = []
+last_query_rewrite = {}
+
+
+def clear_last_rag_sources() -> None:
+    rag.clear_last_sources()
+
+
+def get_last_rag_sources() -> list[dict]:
+    return rag.get_last_sources()
+
+
+def set_conversation_memory_context(messages: list[dict]) -> None:
+    global conversation_memory_context
+    conversation_memory_context = messages or []
+
+
+def clear_last_query_rewrite() -> None:
+    global last_query_rewrite
+    last_query_rewrite = {}
+
+
+def get_last_query_rewrite() -> dict:
+    return last_query_rewrite
 
 
 def set_user_location_context(location_info: dict) -> None:
@@ -37,9 +63,20 @@ def get_user_location_context_text() -> str:
 
     return "".join(parts)
 
-@tool(description="从向量存储中检索参考资料")
+@tool(description="从向量存储中检索参考资料并生成回答，参考来源由前端单独展示")
 def rag_summarize(query: str) -> str:
-    return rag.rag_summarize(query)
+    global last_query_rewrite
+
+    rewritten_query = query_rewriter.rewrite(query, conversation_memory_context)
+    last_query_rewrite = {
+        "original_query": query,
+        "rewritten_query": rewritten_query,
+    }
+
+    logger.info(f"[RAG查询改写]原始query: {query}")
+    logger.info(f"[RAG查询改写]改写query: {rewritten_query}")
+
+    return rag.rag_summarize(rewritten_query)
 
 def query_amap_weather_by_adcode(adcode: str) -> dict:
     """根据高德 adcode 查询实时天气。"""

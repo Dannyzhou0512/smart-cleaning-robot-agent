@@ -9,7 +9,18 @@ from Agent_project.utils.location_service import (
     format_location_text,
 )
 
-from agent.tools.agent_tools import set_user_location_context
+from agent.tools.agent_tools import (
+    clear_last_query_rewrite,
+    clear_last_rag_sources,
+    get_last_query_rewrite,
+    get_last_rag_sources,
+    set_conversation_memory_context,
+    set_user_location_context,
+)
+
+
+AGENT_SESSION_VERSION = "query_rewrite_v1"
+MEMORY_TURNS = 20
 
 
 CURRENT_LOCATION_KEYWORDS = (
@@ -31,6 +42,97 @@ CURRENT_LOCATION_KEYWORDS = (
 def should_attach_location_context(user_prompt: str) -> bool:
     """仅在用户明确询问当前位置/本地场景时附加定位上下文。"""
     return any(keyword in user_prompt for keyword in CURRENT_LOCATION_KEYWORDS)
+
+
+def render_rag_sources(sources: list[dict] | None) -> None:
+    if not sources:
+        return
+
+    with st.expander("参考来源", expanded=False):
+        for source in sources:
+            index = source.get("index", "")
+            document_name = source.get("document_name", "未知文档")
+            score = source.get("relevance_score", source.get("similarity_score"))
+            score_text = "未知" if score is None else str(score)
+
+            st.markdown(f"**{index}. 命中文档：{document_name}**")
+            st.write(f"相关性分数：{score_text}")
+            st.write(f"片段摘要：{source.get('summary', '')}")
+
+            metadata = source.get("metadata") or {}
+            if metadata:
+                st.write("metadata：")
+                st.json(metadata, expanded=False)
+
+
+def render_process_steps(process_steps: list[dict] | None) -> None:
+    if not process_steps:
+        return
+
+    with st.expander("处理过程", expanded=False):
+        for index, step in enumerate(process_steps, start=1):
+            title = step.get("title", "步骤")
+            content = step.get("content", "")
+            st.markdown(f"**{index}. {title}**")
+            st.write(content)
+
+
+def render_live_process_steps(process_steps: list[dict], target) -> None:
+    target.empty()
+
+    if not process_steps:
+        return
+
+    with target.container():
+        st.markdown("**处理过程**")
+        for index, step in enumerate(process_steps, start=1):
+            title = step.get("title", "步骤")
+            content = step.get("content", "")
+            st.markdown(f"**{index}. {title}**")
+            st.write(content)
+
+
+def build_short_term_memory(messages: list[dict], max_turns: int = MEMORY_TURNS) -> list[dict]:
+    memory_messages = []
+
+    for message in messages:
+        role = message.get("role")
+        content = message.get("content", "")
+
+        if role in {"user", "assistant"} and content:
+            memory_messages.append({
+                "role": role,
+                "content": content,
+            })
+
+    return memory_messages[-max_turns * 2:]
+
+
+def append_query_rewrite_step(process_steps: list[dict], query_rewrite: dict | None) -> list[dict]:
+    if not query_rewrite:
+        return process_steps
+
+    original_query = query_rewrite.get("original_query", "")
+    rewritten_query = query_rewrite.get("rewritten_query", "")
+
+    if not original_query or not rewritten_query:
+        return process_steps
+
+    content = (
+        f"原始检索词：{original_query}\n\n"
+        f"改写后检索词：{rewritten_query}"
+    )
+
+    rewrite_step = {
+        "title": "RAG查询改写",
+        "content": content,
+    }
+
+    for index, step in enumerate(process_steps):
+        if step.get("title") == "工具调用" and "rag_summarize" in step.get("content", ""):
+            return process_steps[:index + 1] + [rewrite_step] + process_steps[index + 1:]
+
+    return [rewrite_step] + process_steps
 
 
 # 标题
@@ -67,8 +169,9 @@ else:
     st.sidebar.info("浏览器定位未授权或暂未获取到，将使用 IP 城市定位兜底。")
 
 #如果智能体不在这个列表里面则重新创建智能体
-if "agent" not in st.session_state:
+if st.session_state.get("agent_session_version") != AGENT_SESSION_VERSION:
     st.session_state["agent"] = ReactAgent()
+    st.session_state["agent_session_version"] = AGENT_SESSION_VERSION
 
 # 这个session_state相当于是一个全局的记忆盒子
 if "messages" not in st.session_state:
@@ -76,20 +179,28 @@ if "messages" not in st.session_state:
 
 #每次脚本刷新代码都会遍历messages所有的历史记录，按照顺寻重新渲染在页面上
 for message in st.session_state["messages"]:
-    st.chat_message(message["role"]).write(message["content"])
+    with st.chat_message(message["role"]):
+        if message["role"] == "assistant":
+            render_process_steps(message.get("process_steps"))
+            st.write(message["content"])
+            render_rag_sources(message.get("sources"))
+        else:
+            st.write(message["content"])
 
 prompt = st.chat_input()
 
 if prompt:
-    # 1. 立即在界面显示用户的问题，并存入历史
+    history_messages = build_short_term_memory(st.session_state["messages"])
+    st.session_state["messages"].append({"role": "user", "content": prompt})
     st.chat_message("user").write(prompt)
-    st.session_state["messages"].append({"role":"user","content":prompt})
 
     response_messages = []
-    with st.spinner("智能客服思考中..."):
 
-        #页面上仍然显示用户原始问题 prompt，只是传给 Agent 的内容多了定位上下文
-        #接受数据流
+    with st.spinner("智能客服思考中..."):
+        clear_last_rag_sources()
+        clear_last_query_rewrite()
+        set_conversation_memory_context(history_messages)
+
         location_context = ""
 
         if "location_info" in st.session_state:
@@ -105,16 +216,53 @@ if prompt:
                 f"用户问题：{prompt}"
             )
 
-        res_stream = st.session_state["agent"].execute_stream(agent_prompt)
-        def capture(generator,cache_list):
-            for chunk in generator:
-                cache_list.append(chunk)
-                for char in chunk:
-                    time.sleep(0.01)
-                    yield char
+        with st.chat_message("assistant"):
+            process_steps = []
+            answer_text = ""
+            process_slot = st.empty()
+            answer_slot = st.empty()
 
-        st.chat_message("assistant").write_stream(capture(res_stream,response_messages))
-        st.session_state["messages"].append({"role":"assistant","content":response_messages[-1]})
+            for event in st.session_state["agent"].execute_events(
+                agent_prompt,
+                history_messages=history_messages,
+            ):
+                event_type = event.get("type")
+
+                if event_type == "process":
+                    step = event.get("step")
+                    if step:
+                        process_steps.append(step)
+                        render_live_process_steps(process_steps, process_slot)
+
+                if event_type == "answer":
+                    chunk = event.get("content", "")
+                    response_messages.append(chunk)
+
+                    for char in chunk:
+                        answer_text += char
+                        answer_slot.markdown(answer_text)
+                        time.sleep(0.01)
+
+            process_steps = st.session_state["agent"].get_last_process_steps()
+            query_rewrite = get_last_query_rewrite()
+            process_steps = append_query_rewrite_step(process_steps, query_rewrite)
+            rag_sources = get_last_rag_sources()
+
+            process_slot.empty()
+            with process_slot.container():
+                render_process_steps(process_steps)
+
+            render_rag_sources(rag_sources)
+
+        full_response = "".join(response_messages)
+
+        st.session_state["messages"].append({
+            "role": "assistant",
+            "content": full_response,
+            "process_steps": process_steps,
+            "sources": rag_sources,
+        })
+
         st.rerun()
 
 
