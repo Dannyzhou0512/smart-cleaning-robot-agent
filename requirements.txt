@@ -1,0 +1,13 @@
+﻿streamlit
+streamlit-js-eval
+langchain
+langchain-community
+langchain-core
+langchain-chroma
+langchain-text-splitters
+chromadb
+dashscope
+pypdf
+pyyaml
+requests
+python-dotenv
