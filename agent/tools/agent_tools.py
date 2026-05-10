@@ -13,6 +13,7 @@ user_ids = ["1234567890", "9876543210", "1111111111", "2222222222", "3333333333"
 month_arr = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"]
 extra_data = {}
 user_location_context = {}
+user_profile_context = {}
 conversation_memory_context = []
 last_query_rewrite = {}
 
@@ -43,6 +44,12 @@ def set_user_location_context(location_info: dict) -> None:
     """由 Streamlit 前端写入当前用户定位信息，供 Agent 工具读取。"""
     global user_location_context
     user_location_context = location_info or {}
+
+
+def set_user_profile_context(profile_info: dict) -> None:
+    """由 Streamlit 前端写入当前用户配置，供 Agent 工具读取。"""
+    global user_profile_context
+    user_profile_context = profile_info or {}
 
 
 def get_user_location_context_text() -> str:
@@ -248,6 +255,10 @@ def get_user_location() -> str:
 
 @tool(description="获取用户的ID，以纯字符串形式返回")
 def get_user_id() -> str:
+    configured_user_id = user_profile_context.get("user_id", "")
+    if configured_user_id:
+        return configured_user_id
+
     return random.choice(user_ids)
 
 
